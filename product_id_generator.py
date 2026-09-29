@@ -57,7 +57,8 @@ class Database:
                     pname TEXT,
                     seq INTEGER,
                     full TEXT UNIQUE,
-                    descr TEXT,
+                    insured TEXT,
+                    branch TEXT,
                     created TEXT,
                     deleted INTEGER DEFAULT 0,
                     UNIQUE(year, pc, seq)
@@ -65,6 +66,10 @@ class Database:
             """)
             try:
                 conn.execute("ALTER TABLE products ADD COLUMN deleted INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE records ADD COLUMN branch TEXT")
             except Exception:
                 pass
 
@@ -124,9 +129,18 @@ class Database:
         full_id = f"{year}/{product_code}/{next_seq:04d}"
         return full_id, year, next_seq
 
-    def add_record(self, year, product_code, product_name, seq, descr):
-        if not descr.strip():
-            raise ValueError("توضیحات الزامی است.")
+    def add_record(self, year, product_code, product_name, seq, insured, branch):
+        insured = (insured or "").strip()
+        branch = (branch or "").strip()
+
+        if not insured:
+            raise ValueError("مشخصات بیمه‌گزار الزامی است.")
+        if not branch:
+            raise ValueError("شعبه صدور الزامی است.")
+        if len(insured) > 50:
+            raise ValueError("مشخصات بیمه‌گزار حداکثر ۵۰ کاراکتر مجاز است.")
+        if len(branch) > 50:
+            raise ValueError("شعبه صدور حداکثر ۵۰ کاراکتر مجاز است.")
 
         with self.get_conn() as conn:
             prod = conn.execute("SELECT 1 FROM products WHERE code=? AND deleted=0", (product_code,)).fetchone()
@@ -142,27 +156,33 @@ class Database:
 
             full_id = f"{year}/{product_code}/{seq:04d}"
             conn.execute("""
-                INSERT INTO records (year, pc, pname, seq, full, descr, created, deleted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0)
-            """, (year, product_code, product_name, seq, full_id, descr.strip(), get_today_jalali()))
+                INSERT INTO records (year, pc, pname, seq, full, insured, branch, created, deleted)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
+            """, (year, product_code, product_name, seq, full_id, insured, branch, get_today_jalali()))
             conn.commit()
 
-    def get_records(self, archived=False, f_code=None, f_desc=None, d1=None, d2=None, pcs=None):
+    def get_records(self, archived=False, f_code=None, f_insured=None, f_branch=None, d1=None, d2=None, pcs=None):
         query = ["SELECT * FROM records WHERE deleted=?"]
         params = [1 if archived else 0]
 
         if f_code:
             query.append("AND full LIKE ?")
             params.append(f"%{f_code}%")
-        if f_desc:
-            query.append("AND descr LIKE ?")
-            params.append(f"%{f_desc}%")
+        if f_insured:
+            query.append("AND insured LIKE ?")
+            params.append(f"%{f_insured}%")
+
+        if f_branch:
+            query.append("AND branch LIKE ?")
+            params.append(f"%{f_branch}%")
+            
         if d1:
             query.append("AND created >= ?")
             params.append(d1)
         if d2:
             query.append("AND created <= ?")
             params.append(d2)
+            
         if pcs is not None:
             if pcs:
                 placeholders = ",".join("?" for _ in pcs)
@@ -217,20 +237,32 @@ class Database:
 class AskDescription(tk.Toplevel):
     def __init__(self, parent, full_id):
         super().__init__(parent)
-        self.title("ورود توضیحات شناسه")
-        self.geometry("520x300")
+        self.title("ورود اطلاعات شناسه")
+        self.geometry("520x260")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
 
-        self.result = None
+        self.result = None  # will be tuple: (insured, branch)
 
-        ttk.Label(self, text=f"شناسه پیشنهادی: {full_id}", font=("Consolas", 12, "bold"), foreground="#004d40").pack(pady=(12, 4))
-        ttk.Label(self, text="لطفاً توضیحات کامل را وارد نمایید (الزامی):", font=("Segoe UI", 9, "bold")).pack(anchor="e", padx=15, pady=(4, 2))
+        ttk.Label(
+            self,
+            text=f"شناسه : {full_id}",
+            font=("Consolas", 12, "bold"),
+            foreground="#004d40"
+        ).pack(pady=(12, 10))
 
-        self.txt = tk.Text(self, wrap="word", height=8, font=("Segoe UI", 10), relief="solid", bd=1)
-        self.txt.pack(fill="both", expand=True, padx=15, pady=6)
-        self.txt.focus_set()
+        frm = ttk.Frame(self)
+        frm.pack(fill="x", padx=15)
+
+        ttk.Label(frm, text="بیمه گزار :", font=("Segoe UI", 9, "bold")).pack(anchor="e", pady=(0, 2))
+        self.e_insured = ttk.Entry(frm, justify="right")
+        self.e_insured.pack(fill="x", pady=(0, 8))
+        self.e_insured.focus_set()
+
+        ttk.Label(frm, text="شعبه صدور : ", font=("Segoe UI", 9, "bold")).pack(anchor="e", pady=(0, 2))
+        self.e_branch = ttk.Entry(frm, justify="right")
+        self.e_branch.pack(fill="x", pady=(0, 8))
 
         btn_box = ttk.Frame(self)
         btn_box.pack(fill="x", padx=15, pady=(0, 12))
@@ -240,11 +272,23 @@ class AskDescription(tk.Toplevel):
         self.wait_window(self)
 
     def on_ok(self):
-        val = self.txt.get("1.0", "end").strip()
-        if not val:
-            messagebox.showwarning("خطا", "توضیحات نمی‌تواند خالی باشد.", parent=self)
+        insured = (self.e_insured.get() or "").strip()
+        branch = (self.e_branch.get() or "").strip()
+
+        if not insured:
+            messagebox.showwarning("خطا", "مشخصات بیمه‌گزار نمی‌تواند خالی باشد.", parent=self)
             return
-        self.result = val
+        if not branch:
+            messagebox.showwarning("خطا", "شعبه صدور نمی‌تواند خالی باشد.", parent=self)
+            return
+        if len(insured) > 50:
+            messagebox.showwarning("خطا", "مشخصات بیمه‌گزار حداکثر ۵۰ کاراکتر مجاز است.", parent=self)
+            return
+        if len(branch) > 50:
+            messagebox.showwarning("خطا", "شعبه صدور حداکثر ۵۰ کاراکتر مجاز است.", parent=self)
+            return
+
+        self.result = (insured, branch)
         self.destroy()
 
 
@@ -261,9 +305,13 @@ class FilterPanel(ttk.Frame):
         self.e_code = ttk.Entry(f, width=14, justify="right")
         self.e_code.pack(side="right", padx=3)
 
-        ttk.Label(f, text="توضیحات:").pack(side="right", padx=2)
-        self.e_desc = ttk.Entry(f, width=18, justify="right")
-        self.e_desc.pack(side="right", padx=3)
+        ttk.Label(f, text="بیمه‌ گزار:").pack(side="right", padx=2)
+        self.e_insured = ttk.Entry(f, width=18, justify="right")
+        self.e_insured.pack(side="right", padx=3)
+
+        ttk.Label(f, text="شعبه صدور:").pack(side="right", padx=2)
+        self.e_branch = ttk.Entry(f, width=14, justify="right")
+        self.e_branch.pack(side="right", padx=3)
 
         ttk.Label(f, text="از تاریخ:").pack(side="right", padx=2)
         self.e_d1 = ttk.Entry(f, width=10, justify="right")
@@ -324,7 +372,8 @@ class FilterPanel(ttk.Frame):
         sel = [c for c, v in self.vars.items() if v.get()] if self.vars else None
         return {
             "f_code": self.e_code.get().strip() or None,
-            "f_desc": self.e_desc.get().strip() or None,
+            "f_insured": self.e_insured.get().strip() or None,
+            "f_branch": self.e_branch.get().strip() or None,
             "d1": self.e_d1.get().strip() or None,
             "d2": self.e_d2.get().strip() or None,
             "pcs": sel
@@ -332,7 +381,8 @@ class FilterPanel(ttk.Frame):
 
     def clear(self):
         self.e_code.delete(0, "end")
-        self.e_desc.delete(0, "end")
+        self.e_insured.delete(0, "end")
+        self.e_branch.delete(0, "end")
         self.e_d1.delete(0, "end")
         self.e_d2.delete(0, "end")
         self.all_var.set(True)
@@ -340,19 +390,21 @@ class FilterPanel(ttk.Frame):
 
 
 def build_table(parent):
-    cols = ("chk", "full", "pname", "descr", "created", "status")
+    cols = ("chk", "full", "pname", "insured", "branch", "created", "status")
     tree = ttk.Treeview(parent, columns=cols, show="headings", selectmode="extended")
     tree.heading("chk", text="[✓]")
     tree.heading("full", text="شناسه")
     tree.heading("pname", text="محصول")
-    tree.heading("descr", text="توضیحات")
+    tree.heading("insured", text="بیمه‌گزار")
+    tree.heading("branch", text="شعبه صدور")
     tree.heading("created", text="تاریخ")
     tree.heading("status", text="وضعیت")
 
     tree.column("chk", width=45, anchor="center", stretch=False)
     tree.column("full", width=160, anchor="center")
     tree.column("pname", width=170, anchor="center")
-    tree.column("descr", width=340, anchor="e")
+    tree.column("insured", width=220, anchor="e")
+    tree.column("branch", width=160, anchor="center")
     tree.column("created", width=110, anchor="center")
     tree.column("status", width=90, anchor="center")
 
@@ -408,10 +460,10 @@ def export_excel(parent, rows):
     ws = wb.active
     ws.title = "شناسه‌ها"
     ws.views.sheetView[0].rightToLeft = True
-    ws.append(["شناسه", "محصول", "توضیحات", "تاریخ", "وضعیت"])
+    ws.append(["شناسه", "محصول", "بیمه‌گزار", "شعبه صدور", "تاریخ", "وضعیت"])
     for r in rows:
         st = "بایگانی" if r["deleted"] else "فعال"
-        ws.append([r["full"], r["pname"], r["descr"], r["created"], st])
+        ws.append([r["full"], r["pname"], r["insured"], r["branch"], r["created"], st])
     wb.save(path)
     messagebox.showinfo("خروجی اکسل", f"{len(rows)} رکورد با موفقیت ذخیره شد.")
 
@@ -467,7 +519,7 @@ class ArchiveWindow(tk.Toplevel):
         self.current_rows = self.db.get_records(archived=True, **self.fp.values())
         self.tree.delete(*self.tree.get_children())
         for r in self.current_rows:
-            self.tree.insert("", "end", iid=str(r["id"]), values=("☐", r["full"], r["pname"], r["descr"], r["created"], "بایگانی"))
+            self.tree.insert("", "end", iid=str(r["id"]), values=("☐", r["full"], r["pname"], r["insured"], r["branch"], r["created"], "بایگانی"))
         _, arch_cnt = self.db.get_counts()
         self.lbl_count.config(text=f"تعداد کل رکوردهای بایگانی‌شده: {arch_cnt}")
 
@@ -579,7 +631,7 @@ class App(tk.Tk):
         self.current_rows = self.db.get_records(archived=False, **self.fp.values())
         self.tree.delete(*self.tree.get_children())
         for r in self.current_rows:
-            self.tree.insert("", "end", iid=str(r["id"]), values=("☐", r["full"], r["pname"], r["descr"], r["created"], "فعال"))
+            self.tree.insert("", "end", iid=str(r["id"]), values=("☐", r["full"], r["pname"], r["insured"], r["branch"], r["created"], "فعال"))
 
         active_cnt, arch_cnt = self.db.get_counts()
         self.lbl_counts.config(text=f"تعداد رکوردهای اصلی: {active_cnt} | بایگانی‌شده: {arch_cnt}")
@@ -610,13 +662,14 @@ class App(tk.Tk):
         self.lbl_prop.config(text=prop_id)
 
         dlg = AskDescription(self, prop_id)
-        desc = dlg.result
-        if not desc:
+        res = dlg.result
+        if not res:
             return
+        insured, branch = res
 
         if messagebox.askyesno("تأیید نهایی ثبت", f"شناسه تولیدشده: {prop_id}\n\nآیا از ثبت نهایی این شناسه اطمینان دارید؟"):
             try:
-                self.db.add_record(year, code, pname, seq, desc)
+                self.db.add_record(year, code, pname, seq, insured, branch)
                 self.refresh()
                 messagebox.showinfo("موفقیت", f"شناسه {prop_id} با موفقیت در سیستم ثبت گردید.")
             except Exception as e:
